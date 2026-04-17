@@ -331,6 +331,110 @@ Observed after failure:
 
 ---
 
+## Part 6: Final Project (Lab 06 Recreate)
+
+### Objective
+
+Built a new clean production-ready project in:
+
+- `06-lab-complete-recreate/`
+
+This project implements the required structure and production features from Day 12 Lab.
+
+### Final project structure delivered
+
+```text
+06-lab-complete-recreate/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config.py
+│   ├── auth.py
+│   ├── rate_limiter.py
+│   └── cost_guard.py
+├── utils/
+│   └── mock_llm.py
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── .env.example
+├── .dockerignore
+├── railway.toml
+├── check_production_ready.py
+└── README.md
+```
+
+### Implemented requirements
+
+Functional:
+
+- Agent answers questions via REST API (`POST /ask`)
+- Conversation state stored in Redis per user (`history:<user_id>`)
+
+Non-functional:
+
+- Multi-stage Docker build
+- Configuration via environment variables
+- API key authentication (`X-API-Key`)
+- Rate limiting (`10 req/min`)
+- Cost guard (`$10/month` per user)
+- Health check (`GET /health`)
+- Readiness check (`GET /ready`)
+- Graceful shutdown with SIGTERM handling
+- Stateless design using Redis
+- Structured JSON logging
+- No hardcoded secrets in source
+
+### Validation results
+
+Deployed public URL:
+
+- `https://day122a202600471lehoangminh-production.up.railway.app`
+
+Readiness checker:
+
+```bash
+cd 06-lab-complete-recreate
+python check_production_ready.py
+```
+
+Observed result:
+
+- `19/19 checks passed`
+
+Runtime verification with Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+Observed `GET /health` response:
+
+```json
+{"status":"ok","instance_id":"b10fc11f1b9c","uptime_seconds":3.4,"redis_connected":true,"timestamp":"2026-04-17T16:36:33.948910+00:00"}
+```
+
+Observed authenticated `POST /ask` response:
+
+```json
+{"user_id":"test","question":"hello redis","answer":"Redis stores fast shared state across instances for stateless scaling.","served_by":"b10fc11f1b9c","usage":{"rate_limit_remaining":9,"monthly_spend_usd":0.000013,"monthly_budget_usd":10.0},"timestamp":"2026-04-17T16:36:34.116816+00:00"}
+```
+
+Stack shutdown:
+
+```bash
+docker compose down
+```
+
+Deployment notes for this recreated project are documented in `DEPLOYMENT.md`.
+
+Public endpoint verification (after deployment):
+
+- `GET /health` on public URL returned:
+   - `{"status":"ok","instance_id":"68d45a975f83","uptime_seconds":136.2,"redis_connected":true,"timestamp":"2026-04-17T16:49:11.717702+00:00"}`
+- Authenticated `POST /ask` on public URL returned:
+   - `{"user_id":"public-test","question":"hello redis","answer":"Redis stores fast shared state across instances for stateless scaling.","served_by":"68d45a975f83","usage":{"rate_limit_remaining":9,"monthly_spend_usd":0.000013,"monthly_budget_usd":10.0},"timestamp":"2026-04-17T16:49:12.276217+00:00"}`
+
 ## Pre-Submission Checklist
 
 - [ ] Repository is public (or instructor has access)
