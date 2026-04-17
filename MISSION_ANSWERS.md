@@ -46,7 +46,7 @@ Code analyzed: `01-localhost-vs-production/develop/app.py`
 
 Code analyzed: `02-docker/develop/Dockerfile`
 
-1. **Base image:** `python:3.11-slim` — lightweight Python 3.11 image
+1. **Base image:** `python:3.11` (full Python image) in develop Dockerfile
 2. **Working directory:** `/app`
 3. **Why `COPY requirements.txt` first?** — Docker caches layers. If only code changed but dependencies didn't, Docker reuses the cached dependency layer, speeding up builds significantly.
 4. **CMD vs ENTRYPOINT:**
@@ -54,11 +54,60 @@ Code analyzed: `02-docker/develop/Dockerfile`
    - `ENTRYPOINT` — Hardcoded command; arguments passed at runtime are appended
    - `CMD` is more flexible; `ENTRYPOINT` is for fixed command patterns
 
+### Exercise 2.2: Build and run results
+
+Commands executed from project root:
+
+```bash
+docker build -f 02-docker/develop/Dockerfile -t my-agent:develop .
+docker run -p 8001:8000 my-agent:develop
+curl http://localhost:8001/health
+curl -X POST --get --data-urlencode "question=What is Docker?" http://localhost:8001/ask
+docker images my-agent:develop
+```
+
+Observed outputs:
+
+- Health endpoint: `{"status":"ok","uptime_seconds":5.6,"container":true}`
+- Ask endpoint: `{"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}`
+- Image size: `my-agent:develop 1.66GB`
+
 ### Exercise 2.3: Image size comparison
 
-- **Develop image:** `python:3.11-slim` base (~150 MB) + dependencies + all code
-- **Production image:** Multi-stage build — builder stage (full Python + build tools) discarded, only runtime stage copied (~45-80 MB)
-- **Difference:** ~50-70% smaller with multi-stage build
+- **Develop image:** `python:3.11` base + dependencies + all code = `1.66GB`
+- **Production image:** Multi-stage build — builder stage (full Python + build tools) discarded, only runtime stage copied (236MB)
+- **Difference:** from `1.66GB` to `236MB` (about `85.8%` smaller)
+
+### Exercise 2.4: Docker Compose stack
+
+Stack run in `02-docker/production` with compose:
+
+```bash
+docker compose up -d
+docker compose ps
+curl http://127.0.0.1/health
+```
+
+Services started:
+
+- `agent` (FastAPI app)
+- `redis` (cache/session)
+- `qdrant` (vector DB)
+- `nginx` (reverse proxy)
+
+Communication flow:
+
+- Client → `nginx:80`
+- Nginx proxies to `agent:8000`
+- Agent talks to `redis:6379` and `qdrant:6333`
+
+Observed health output:
+
+- `{"status":"ok","uptime_seconds":217.1,"version":"2.0.0","timestamp":"2026-04-17T09:54:19.578852"}`
+
+Observed ask output (tested via WSL request to avoid Windows IIS localhost conflict):
+
+- `{"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}`
 
 ---
 
@@ -66,13 +115,59 @@ Code analyzed: `02-docker/develop/Dockerfile`
 
 ### Exercise 3.1: Railway deployment
 
-- **URL:** https://your-app.railway.app
-- **Screenshot:** [Link to screenshot in repo]
+- **URL:** https://day122a202600471lehoangminh-production.up.railway.app
+- **Deploy command used:** `railway up`
+- **Variables set:** `PORT=8000`
+- **Screenshot**: D:\AI\day12_2A202600471_LeHoangMinh\screenshot\image.png, D:\AI\day12_2A202600471_LeHoangMinh\screenshot\Screenshot 2026-04-17 171611.png
+
+Verification tests:
+
+```bash
+curl https://day122a202600471lehoangminh-production.up.railway.app/health
+```
+
+Observed output:
+
+- `{"status":"ok","uptime_seconds":132.7,"platform":"Railway","timestamp":"2026-04-17T10:09:32.920329+00:00"}`
+
+Ask endpoint test (PowerShell JSON body):
+
+```powershell
+$body = @{ question = "Hello" } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://day122a202600471lehoangminh-production.up.railway.app/ask" -Method Post -ContentType "application/json" -Body $body
+```
+
+Observed output:
+
+- JSON response includes `question`, `answer`, and `platform="Railway"`
+
+Note:
+
+- `railway logs` initially returned "No service could be found" because CLI context had no selected service. Fix by running `railway service` first, then `railway logs`.
 
 ### Exercise 3.2: render.yaml vs railway.toml differences
 
-- **railway.toml** — Railway's native config, deploys directly via Railway CLI (`railway up`)
-- **render.yaml** — Render's Blueprint format, used for GitHub-connected auto-deployments via Render dashboard
+Files compared:
+
+- `03-cloud-deployment/railway/railway.toml`
+- `03-cloud-deployment/render/render.yaml`
+
+| Aspect | `railway.toml` | `render.yaml` |
+|--------|----------------|---------------|
+| Platform scope | Chỉ cho Railway | Chỉ cho Render |
+| Deploy workflow | CLI-first (`railway up`) | GitHub Blueprint-first (Dashboard auto-provision) |
+| Build definition | `[build] builder = "NIXPACKS"` (auto buildpack detection) | `runtime: python` + explicit `buildCommand` |
+| Start command | `[deploy].startCommand` | `startCommand` per service |
+| Health check | `healthcheckPath`, `healthcheckTimeout` | `healthCheckPath` |
+| Restart policy | `restartPolicyType`, `restartPolicyMaxRetries` | Managed by Render service lifecycle (no direct same fields here) |
+| Environment vars | Set mainly via CLI/Dashboard (`railway variables set ...`) | Defined under `envVars`, supports `sync: false` and `generateValue: true` |
+| Multi-service support | One service config per linked Railway service | Native multi-service blueprint in one file (`web` + `redis`) |
+| Infra as code style | App-focused deploy settings | Full infrastructure blueprint (region, plan, services, Redis add-on) |
+
+Conclusion:
+
+- `railway.toml` is lightweight and optimized for fast CLI deployment.
+- `render.yaml` is more explicit and infrastructure-oriented, suitable when provisioning multiple managed services in one declarative file.
 
 ---
 
@@ -91,29 +186,63 @@ Code analyzed: `04-api-gateway/develop/app.py`
 Code analyzed: `04-api-gateway/production/auth.py`
 
 JWT flow:
-1. Client POSTs username/password to `/token`
-2. Server validates and returns a signed JWT token
-3. Client includes `Authorization: Bearer <token>` header in subsequent requests
-4. Server verifies token signature and expiry before processing
+1. Client POSTs username/password to `/auth/token`
+2. Server validates credentials via `authenticate_user()` against `DEMO_USERS`
+3. Server returns JWT signed with `HS256` (`JWT_SECRET`) and `exp` = 60 minutes
+4. Client includes `Authorization: Bearer <token>` header for protected routes (e.g., `/ask`, `/me/usage`, `/admin/stats`)
+5. Server verifies signature/expiry in `verify_token()` and extracts `username` + `role`
 
 ### Exercise 4.3: Rate Limiting
 
 Code analyzed: `04-api-gateway/production/rate_limiter.py`
 
-- Algorithm: Sliding window (uses Redis sorted sets)
-- Limit: 10 requests per minute per user
-- Admin bypass: Configurable via `ADMIN_USER_IDS` environment variable
+- Algorithm: Sliding Window Counter using in-memory `deque` per user
+- Storage: In-memory dictionary (`defaultdict(deque)`), not Redis
+- Limits:
+   - User role: `10 requests / 60 seconds`
+   - Admin role: `100 requests / 60 seconds`
+- On limit exceeded: returns `429 Too Many Requests` with headers:
+   - `X-RateLimit-Limit`
+   - `X-RateLimit-Remaining`
+   - `X-RateLimit-Reset`
+   - `Retry-After`
 
 ### Exercise 4.4: Cost Guard Implementation
 
 Code analyzed: `04-api-gateway/production/cost_guard.py`
 
 Approach:
-- Each user has a monthly budget (default $10/month)
-- Track spending in Redis with key format: `budget:{user_id}:{YYYY-MM}`
-- Before processing a request, check if `current_spending + estimated_cost <= budget`
-- If exceeded → return `402 Payment Required`
-- Reset spending tracking at the start of each month (TTL on Redis keys)
+- In-memory cost tracking with `UsageRecord` (per user, per day)
+- Budget model:
+   - Per-user daily budget: `$1.0/day`
+   - Global daily budget: `$10.0/day`
+- `check_budget(user_id)` is called before LLM execution:
+   - If user exceeds per-user daily budget → `402 Payment Required`
+   - If system exceeds global budget → `503 Service Unavailable`
+- `record_usage(user_id, input_tokens, output_tokens)` updates token counts and cost after each request
+- Cost is estimated from token pricing constants (`PRICE_PER_1K_INPUT_TOKENS`, `PRICE_PER_1K_OUTPUT_TOKENS`)
+
+### Section 4 Evidence (Executed Tests)
+
+Develop server (`04-api-gateway/develop`, port `8002`):
+
+- `POST /ask` without `X-API-Key` → `401`
+- `POST /ask` with wrong `X-API-Key` → `403`
+- `POST /ask` with correct `X-API-Key: secret-key-123` → `200` + answer JSON
+
+Production server (`04-api-gateway/production`, port `8003`):
+
+- `POST /auth/token` with `student/demo123` → `200` + JWT token
+- `POST /ask` with valid Bearer token → `200`
+- Rate-limit stress test (12 requests as student) returned:
+   - `RATE_STATUSES = [200, 200, 200, 200, 200, 200, 200, 200, 200, 429, 429, 429]`
+
+Implementation note during testing:
+
+- Fixed middleware bug in `04-api-gateway/production/app.py`:
+   - Replaced invalid `response.headers.pop("server", None)`
+   - With safe deletion using `if "server" in response.headers: del response.headers["server"]`
+   - This resolved `500 Internal Server Error` responses in production tests.
 
 ---
 
