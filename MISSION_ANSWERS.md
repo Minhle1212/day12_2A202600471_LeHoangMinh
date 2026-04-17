@@ -252,8 +252,13 @@ Implementation note during testing:
 
 Code analyzed: `05-scaling-reliability/develop/app.py`
 
-- `/health` (liveness probe) — Returns `200 OK` if the process is alive. Simple status check.
-- `/ready` (readiness probe) — Checks Redis and database connectivity. Returns `200 OK` if ready, `503 Service Unavailable` otherwise. Load balancers use this to decide whether to route traffic.
+- `/health` (liveness probe) — returns process/runtime status, uptime, environment, and basic dependency checks.
+- `/ready` (readiness probe) — checks internal readiness state (`_is_ready`) and returns `503` while starting or shutting down.
+
+Verified in scaled production stack via Nginx (`http://localhost:8080`):
+
+- `GET /health` → `{"status":"ok","instance_id":"instance-8c1940","uptime_seconds":19.6,"storage":"redis","redis_connected":true}`
+- `GET /ready` → `{"ready":true,"instance":"instance-8c1940"}`
 
 ### Exercise 5.2: Graceful Shutdown
 
@@ -261,47 +266,68 @@ Code analyzed: `05-scaling-reliability/production/app.py`
 
 Implementation:
 1. Register `SIGTERM` signal handler
-2. On SIGTERM: Set `is_ready = False` to stop new traffic
-3. Wait for in-flight requests to complete (via lifespan shutdown hook)
-4. Close database/Redis connections
-5. Exit cleanly
+2. On SIGTERM: set `_is_shutting_down = True` and `_is_ready = False` so `/ready` starts returning `503`
+3. Track in-flight requests via middleware counter
+4. During shutdown lifespan: wait (up to 30s) for in-flight requests to finish
+5. Exit cleanly (`uvicorn` with `timeout_graceful_shutdown=30`)
 
 ### Exercise 5.3: Stateless Design
 
 Code analyzed: `05-scaling-reliability/production/app.py`
 
-**Anti-pattern (stateful):**
-```python
-conversation_history = {}  # Stored in memory — lost on restart or different instance
-```
+Implemented stateless session storage with Redis only:
 
-**Correct (stateless):**
-```python
-# Conversation history stored in Redis
-history = r.lrange(f"history:{user_id}", 0, -1)
-r.rpush(f"history:{user_id}", new_turn)
-```
+- Session save/load through Redis keys (`session:<session_id>`)
+- Conversation history appended to Redis-backed session
+- No in-memory fallback in production path (Redis is required)
 
-Why? When scaling to multiple instances, each has its own memory. User's request might hit instance 1 (stores history there), then next request hits instance 2 (has no history). Redis is shared across all instances.
+Why this is correct: with multiple replicas, any instance can continue the same conversation because state is centralized in Redis.
 
 ### Exercise 5.4: Load Balancing
 
 Code analyzed: `05-scaling-reliability/production/nginx.conf` + `docker-compose.yml`
 
-- Nginx distributes incoming requests across multiple agent instances using round-robin by default
-- With `--scale agent=3`, 3 agent containers run behind the load balancer
-- If one instance dies, Nginx stops routing to it automatically
-- Requests are spread evenly; each instance can serve any user because state is in Redis
+Stack and verification commands:
+
+```bash
+docker compose up -d --build --scale agent=3
+docker compose ps
+python test_stateless.py
+```
+
+Observed service state:
+
+- `production-agent-1`, `production-agent-2`, `production-agent-3` all running (healthy)
+- `production-nginx-1` exposing `0.0.0.0:8080->80`
+- `production-redis-1` healthy
+
+Observed load balancing evidence from test output:
+
+- `Instances used: {'instance-716d96', 'instance-8c1940', 'instance-449099'}` (3 distinct replicas served requests)
 
 ### Exercise 5.5: Stateless Test Results
 
 Test script: `05-scaling-reliability/production/test_stateless.py`
 
-Expected results:
-- Create a conversation with user A on instance 1
-- Kill instance 1
-- User A's next request → routed to instance 2 or 3
-- Conversation history preserved in Redis → **CONTINUES seamlessly**
+Verified results (normal scaled run):
+
+- Total requests: `5`
+- Instances used: `{'instance-716d96', 'instance-8c1940', 'instance-449099'}`
+- Conversation history count: `10` messages
+- Final status: `Session history preserved across all instances via Redis`
+
+Additional resilience test (after stopping one replica):
+
+```bash
+docker stop production-agent-1
+python test_stateless.py
+```
+
+Observed after failure:
+
+- Requests still succeeded via remaining replicas (`instance-716d96`, `instance-449099`)
+- Conversation history still preserved (`10` messages)
+- Conclusion: service continued correctly with one instance down.
 
 ---
 
